@@ -1,6 +1,8 @@
 #include <Stepper.h>
 #include <Servo.h>
 
+#define NOT_CONNECTED 0
+
 const float RAW_STEP_ANGLE = 5.625;
 const float PULL_IN_SPEED = 600;
 const float STEP_ANGLE = RAW_STEP_ANGLE / 25;
@@ -10,9 +12,8 @@ const int STEPS_PER_REVOLUTION = (180 / STEP_ANGLE);
 // Digital IO PINS
 const int CUPS_EIGHTH = 0;
 const int CUPS_FOURTH = 1;
-const int CUPS_HALF = 2;
-const int CUPS_FULL = 3;
-const int CUPS_THIRD = -1;
+const int CUPS_THIRD = 2;
+const int CUPS_HALF = 3;
 const int MODE_SWITCH = 4;
 const int DISPENSE = 5;
 const int TRI_R = 6;
@@ -29,23 +30,36 @@ const int OUTPUT_FORCE_SENSOR = A0;
 const int DISPENSING_INDICATOR = A1;
 const int ERROR_PREVENTION_PHOTO = A2;
 
-const int DENSITY = 185;
-const int WEIGHT_PER_CUP = DENSITY;
-const float VOLUME_PER_ROTATION = .15;
+const float DENSITY = 185.0;
+const float VOLUME_PER_ROTATION = .138;
+const int TRIGGER_WEIGHT = 200;
+const int TRIGGER_LIGHT = 200;
 
-const int MEASUREMENT_BUTTONS = 5;
+const int MEASUREMENT_BUTTONS = 4;
 const int PLUS_MULTIPLIER = -1;
 
 bool dispense_state = false;
 bool err = true;
 bool selected_amount[MEASUREMENT_BUTTONS];
+float weights[MEASUREMENT_BUTTONS];
 
 unsigned long last_stir = 0;
+bool value_in = false;
 
 // initialize the stepper library on pins 8 through 11:
 Stepper auger_stepper(STEPS_PER_REVOLUTION, STEPPER_WHITE,
                       STEPPER_YELLOW, STEPPER_ORANGE, STEPPER_BLUE);
 Servo paddle_servo;
+
+void set_LED(bool r_state, bool g_state, bool b_state);
+bool value_set();
+void drive_stepper(float revolutions, Stepper& stepper);
+void set_servo_pos(Servo &servo, int pos);
+float get_volume(bool* selected_amount, bool by_weight);
+void stir(Servo& servo);
+void dispense(float volume);
+void read_buttons();
+void LED_state(int state);
 
 void set_LED(bool r_state, bool g_state, bool b_state)
 {
@@ -65,10 +79,14 @@ void setup() {
   pinMode(CUPS_EIGHTH, INPUT);
   pinMode(CUPS_FOURTH, INPUT);
   pinMode(CUPS_HALF, INPUT);
-  pinMode(CUPS_FULL, INPUT);
   pinMode(CUPS_THIRD, INPUT);
   pinMode(MODE_SWITCH, INPUT);
   pinMode(DISPENSE, INPUT);
+
+  weights[0] = 50;
+  weights[1] = 100;
+  weights[2] = 150;
+  weights[3] = 200;
   
   set_LED(HIGH, HIGH, HIGH);
 }
@@ -78,7 +96,9 @@ bool value_set()
   for (int i = 0; i < MEASUREMENT_BUTTONS; ++i)
   {
     if (selected_amount[i])
+    {
       return true;
+    }
   }
   return false;
 }
@@ -93,27 +113,37 @@ void set_servo_pos(Servo &servo, int pos)
   servo.write(pos);
 }
 
-float get_volume(bool* selected_amount, bool by_weight)
+float get_volume(bool by_weight)
 {
   float volume = 0;
   float volume_unit;
-  
+
+  Serial.print("Volume_Unit: ");
+  Serial.println(volume_unit);
+
   if (by_weight)
-    volume_unit = WEIGHT_PER_CUP;
+  {
+    if (selected_amount[0])
+      volume = weights[0] / DENSITY;
+    else if (selected_amount[1])
+      volume = weights[1] / DENSITY;
+    else if (selected_amount[2])
+      volume = weights[1] / DENSITY;
+    else if (selected_amount[3])
+      volume = weights[3] / DENSITY;
+  }
   else
-    volume_unit = 1.0;
-  
-  if (selected_amount[0]) 
-    volume += 1.0/8.0 * volume_unit;
-  if (selected_amount[1])
-    volume += 1.0/4.0 * volume_unit;
-  if (selected_amount[2])
-    volume += 1.0/2.0 * volume_unit;
-  if (selected_amount[3])
-    volume += volume_unit;
-  if (selected_amount[4])
-    volume += PLUS_MULTIPLIER * volume_unit;
-  
+  {
+    if (selected_amount[0])
+      volume = 1.0 / 8.0;
+    else if (selected_amount[1])
+      volume = 1.0 / 4.0;
+    else if (selected_amount[2])
+      volume = 1.0 / 3.0;
+    else if (selected_amount[3])
+      volume = 1.0 / 2.0;
+  }
+
   return volume;
 }
 
@@ -125,29 +155,60 @@ void stir(Servo& servo)
 
 void dispense(float volume)
 {
-  drive_stepper(volume / VOLUME_PER_ROTATION, auger_stepper);
+  Serial.println(volume);
+  drive_stepper(-1.0 * volume / VOLUME_PER_ROTATION, auger_stepper);
+}
+
+void clear_buttons()
+{
+  for (int i = 0; i < MEASUREMENT_BUTTONS; ++i)
+  {
+    selected_amount[i] = false;
+  }
 }
 
 void read_buttons()
 {
-  selected_amount[0] = digitalRead(CUPS_EIGHTH);
-  selected_amount[1] = digitalRead(CUPS_FOURTH);
-  selected_amount[2] = digitalRead(CUPS_THIRD);
-  selected_amount[3] = digitalRead(CUPS_HALF);
-  selected_amount[4] = digitalRead(CUPS_FULL);
+  bool temp[4] = {0};
+  temp[0] = digitalRead(CUPS_EIGHTH);
+  temp[1] = digitalRead(CUPS_FOURTH);
+  temp[2] = digitalRead(CUPS_THIRD);
+  temp[3] = digitalRead(CUPS_HALF);
+  bool conds[MEASUREMENT_BUTTONS];
+  conds[0] = (temp[0] && temp[0] != selected_amount[0]);
+  conds[1] = (temp[1] && temp[1] != selected_amount[1]);
+  conds[2] = (temp[2] && temp[2] != selected_amount[2]);
+  conds[3] = (temp[3] && temp[3] != selected_amount[3]);
+
+  
+  if (conds[0] || conds[1] || conds[2] || conds[3])
+  {
+    clear_buttons();
+    for (int i = 0; i < MEASUREMENT_BUTTONS; ++i)
+    {
+      selected_amount[i] = temp[i];
+      if (temp[i])
+      {
+        Serial.print("Button Detected: ");
+        Serial.println(i);
+        break;
+      }
+    }
+  }
+  
 }
 
 
 void LED_state(int state)
-  // -1/NOTB = Error
-  //       0 = error not triggered
-  //       2 = input + no error: ready to dispense
-  //       3 = dispensing
+// -1/NOTB = Error
+//       0 = error not triggered
+//       2 = input + no error: ready to dispense
+//       3 = dispensing
 {
   switch (state)
   {
     case 0:
-      set_LED(LOW, LOW, LOW);
+      set_LED(HIGH, HIGH, HIGH);
       break;
     case 2:
       set_LED(LOW, HIGH, LOW);
@@ -159,40 +220,47 @@ void LED_state(int state)
       set_LED(HIGH, LOW, LOW);
       break;
   }
-}    
+}
 
 void loop() {
   int weight = analogRead(OUTPUT_FORCE_SENSOR);
   int err_light = analogRead(ERROR_PREVENTION_PHOTO);
-  if ((weight > 2.5) && (err_light < 2.5))
+  read_buttons();
+  if (!value_in)
   {
-   err = false;
-   LED_state(1);
+    value_in = value_set();
+  }
+
+  if (weight > TRIGGER_WEIGHT)
+  {
+    if (value_in)
+    {
+      value_in = true;
+      if (digitalRead(DISPENSE))
+      {
+        bool mode = digitalRead(MODE_SWITCH);
+        LED_state(3);
+        value_in = false;
+        float volume = get_volume(mode);
+        dispense(volume);
+        delay(20);
+        clear_buttons();
+      }
+      else
+      {
+        LED_state(2);
+      }
+    }
+    else
+    {
+      LED_state(1);
+    }
   }
   else
   {
-   err = true;
-   LED_state(0);
-  }
-  
-  read_buttons();
-  bool mode = digitalRead(MODE_SWITCH);
-  if (value_set(selected_amount))
-  {
-    LED_state(2);
+    LED_state(0);
   }
 
-  if (dispense_state == !digitalRead(DISPENSE))
-  {
-    dispense_state = !dispense_state;
-    LED_state(3);
-    if (value_set())
-    {
-      int volume = get_volume(selected_amount, mode);
-      dispense(volume); 
-    }
-  }
-  
   unsigned long current_time = millis();
   if (current_time - last_stir > 15000 || current_time < last_stir)
   {
